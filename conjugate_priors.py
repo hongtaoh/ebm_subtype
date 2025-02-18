@@ -5,6 +5,11 @@ from typing import List, Dict, Tuple
 import logging 
 from collections import defaultdict 
 
+# - participant data, depends on S_n, thus should be separate. 
+# - theta_phi_estimates, depends on `affected`, which depends on `S_n`, thus should be separete.
+# - participant_stages gets updated when looping through participant_data, 
+#     which is dependent on S_n, and thus participant stages should be separate as well. 
+
 def estimate_params_exact(
     m0: float, 
     n0: float, 
@@ -203,7 +208,8 @@ def preprocess_participant_data(
 def metropolis_hastings_subtype_conjugate_priors(
     data_we_have: pd.DataFrame,
     iterations: int,
-    n_shuffle: int
+    n_shuffle: int,
+    upper_limit: float
 ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Perform Metropolis-Hastings sampling with conjugate priors to estimate biomarker orderings.
@@ -212,6 +218,7 @@ def metropolis_hastings_subtype_conjugate_priors(
         data_we_have (pd.DataFrame): Raw participant data.
         iterations (int): Number of iterations for the algorithm.
         n_shuffle (int): Number of swaps to perform when shuffling the order.
+        upper_limit (float): the total likelihood assuming we know real_theta_phi, two orders (and associated participants), and S_n
 
     Returns:
         Tuple[List[Dict], List[float]]: 
@@ -317,6 +324,11 @@ def metropolis_hastings_subtype_conjugate_priors(
 
         new_ln_likelihood1 = sum(ln_likelihoods_order1[p] for p in new_assignments if new_assignments[p] == 1)
         new_ln_likelihood2 = sum(ln_likelihoods_order2[p] for p in new_assignments if new_assignments[p] == 2)
+
+        if new_ln_likelihood1 + new_ln_likelihood2 > upper_limit:
+            logging.error('TOTAL LN LIKELIHOOD EXCEEDS THE UPPER LIMIT! SOMETHING MUST BE WRONG!')
+            raise ValueError('Total log-likelihood exceeds the upper limit! Check for errors in inference or likelihood computation.')
+
         
         delta1 = new_ln_likelihood1 - ln_likelihood1
         delta2 = new_ln_likelihood2 - ln_likelihood2
