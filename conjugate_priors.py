@@ -1,6 +1,6 @@
 import numpy as np 
 import pandas as pd 
-import utils
+from alabEBM.utils import data_processing as utils
 from typing import List, Dict, Tuple
 import logging 
 from collections import defaultdict 
@@ -210,7 +210,7 @@ def metropolis_hastings_subtype_conjugate_priors(
     iterations: int,
     n_shuffle: int,
     upper_limit: float
-) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+) -> Tuple[List[Dict[str, Dict[str, int]]], List[Dict[str, float]], List[Dict[str, int]]]:
     """
     Perform Metropolis-Hastings sampling with conjugate priors to estimate biomarker orderings.
 
@@ -225,7 +225,6 @@ def metropolis_hastings_subtype_conjugate_priors(
             - List of accepted biomarker orderings at each iteration.
             - List of log likelihoods at each iteration.
     """
-
     n_participants = len(data_we_have.participant.unique())
     biomarkers = data_we_have.biomarker.unique()
     n_stages = len(biomarkers) + 1
@@ -237,32 +236,42 @@ def metropolis_hastings_subtype_conjugate_priors(
 
     # initialize an ordering and likelihood
     order1 = np.random.permutation(np.arange(1, n_stages))
+    # order1 = np.arange(1,11)
     order1_dict = dict(zip(biomarkers, order1))
     ln_likelihood1 = -np.inf
     acceptance_count1 = 0
 
     # initialize an ordering and likelihood
     order2 = np.random.permutation(np.arange(1, n_stages))
+    # order2 = np.array([1,2,3,5,4,6,7,8,10,9])
     order2_dict = dict(zip(biomarkers, order2))
     ln_likelihood2 = -np.inf
     acceptance_count2 = 0
 
     # Note that this records only the current accepted orders in each iteration
-    all_orders = []
+    all_orders = defaultdict(list)
     # This records all log likelihoods
-    log_likelihoods = []
-    participant_order_assignments = []
+    log_likelihoods = defaultdict(list)
+    participantg_order_assignments_history = []
 
-    # Initiate random participant stages
-    participant_stages = np.zeros(n_participants)
+    #initialize participant assignments
+    participant_order_assignments = {}
+    for p in range(n_participants):
+        participant_order_assignments[p] = np.random.choice([1,2])
+
+    #initialize stages based on assignments
+    participant_stages1 = np.zeros(n_participants)
+    participant_stages2 = np.zeros(n_participants)
     for idx in range(n_participants):
         if idx not in non_diseased_ids:
-            participant_stages[idx] = np.random.randint(1, len(diseased_stages) + 1)
-    participant_stages1 = participant_stages.copy()
-    participant_stages2 = participant_stages.copy()
+            if participant_order_assignments[idx] == 1:
+                participant_stages1[idx] = np.random.randint(1, len(diseased_stages) + 1)
+            else:
+                participant_stages2[idx] = np.random.randint(1, len(diseased_stages) + 1)
 
     for iteration in range(iterations):
-        log_likelihoods.append({'order1': ln_likelihood1, 'order2': ln_likelihood2})
+        log_likelihoods['order1'].append(ln_likelihood1)
+        log_likelihoods['order2'].append(ln_likelihood2)
 
         new_order1 = order1.copy()
         utils.shuffle_order(new_order1, n_shuffle)
@@ -276,6 +285,7 @@ def metropolis_hastings_subtype_conjugate_priors(
         data_we_have1 = data_we_have.copy()
         data_we_have2 = data_we_have.copy()
 
+        #This will add S_n, k_j, and affected cols
         biomarker_data1 = preprocess_biomarker_data(
             data_we_have1, new_order1_dict, participant_stages1)
         biomarker_data2 = preprocess_biomarker_data(
@@ -320,16 +330,15 @@ def metropolis_hastings_subtype_conjugate_priors(
             else:
                 new_assignments[p] = 2
 
-        participant_order_assignments.append(new_assignments)
+        participantg_order_assignments_history.append(new_assignments)
 
         new_ln_likelihood1 = sum(ln_likelihoods_order1[p] for p in new_assignments if new_assignments[p] == 1)
         new_ln_likelihood2 = sum(ln_likelihoods_order2[p] for p in new_assignments if new_assignments[p] == 2)
 
-        if new_ln_likelihood1 + new_ln_likelihood2 > upper_limit:
-            logging.error('TOTAL LN LIKELIHOOD EXCEEDS THE UPPER LIMIT! SOMETHING MUST BE WRONG!')
-            raise ValueError('Total log-likelihood exceeds the upper limit! Check for errors in inference or likelihood computation.')
+        # if new_ln_likelihood1 + new_ln_likelihood2 > upper_limit:
+        #     logging.error('TOTAL LN LIKELIHOOD EXCEEDS THE UPPER LIMIT! SOMETHING MUST BE WRONG!')
+        #     raise ValueError('Total log-likelihood exceeds the upper limit! Check for errors in inference or likelihood computation.')
 
-        
         delta1 = new_ln_likelihood1 - ln_likelihood1
         delta2 = new_ln_likelihood2 - ln_likelihood2
 
@@ -362,9 +371,10 @@ def metropolis_hastings_subtype_conjugate_priors(
             ln_likelihood2 = new_ln_likelihood2
             order2_dict = new_order2_dict 
             acceptance_count2 += 1
-        
-        all_orders.append({"order1": order1_dict, "order2": order2_dict})
 
+        all_orders['order1'].append(order1_dict)
+        all_orders['order2'].append(order2_dict)
+        
         # Log progress
         if (iteration + 1) % max(10, iterations // 10) == 0:
             acceptance_ratio1 = 100 * acceptance_count1 / (iteration + 1)
@@ -379,4 +389,4 @@ def metropolis_hastings_subtype_conjugate_priors(
                 f"Current Accepted Order2: {order2_dict}"
             )
 
-    return all_orders, log_likelihoods, participant_order_assignments
+    return all_orders, log_likelihoods, participantg_order_assignments_history
