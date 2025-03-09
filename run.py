@@ -6,17 +6,20 @@ import logging
 from typing import List, Dict, Optional, Tuple
 from scipy.stats import kendalltau
 import re 
+from collections import defaultdict, Counter
+
 
 # Import utility functions
-from alabEBM.utils.visualization import save_heatmap, save_traceplot 
-from alabEBM.utils.logging_utils import setup_logging 
-from alabEBM.utils.data_processing import get_theta_phi_estimates, obtain_most_likely_order_dic
-from alabEBM.utils.runners import extract_fname, cleanup_old_files
-from alabEBM.utils import data_processing as data_utils
+from alabebm.utils.visualization import save_heatmap, save_traceplot 
+from alabebm.utils.logging_utils import setup_logging 
+from alabebm.utils.data_processing import get_theta_phi_estimates, obtain_most_likely_order_dic
+from alabebm.utils.runners import extract_fname, cleanup_old_files
+from alabebm.utils import data_processing as data_utils
 
 # Import algorithms
-import conjugate_priors 
-from alabEBM import get_params_path
+import conjugate_priors_fixed_params_and_subtypes
+from alabebm import get_params_path
+import conjugate_priors_fixed_params_and_known_two_orders
 
 """
 `process_participant_data` adds S_n to the original data based on the two biomarker orderings. 
@@ -93,6 +96,66 @@ def calculate_upper_limit(
         total_ln_likelihood += ln_likelihood
     return total_ln_likelihood
 
+def best_kendall_tau_pairing(
+    real_order1_dict:Dict[str, int], 
+    real_order2_dict:Dict[str, int], 
+    guessed_order1_dict:Dict[str, int], 
+    guessed_order2_dict:Dict[str, int], 
+    ) -> Tuple[Dict, Dict, Dict, Dict, float, float, str]:
+    #sort keys for each dict, so we can compare the values safely
+    real_order1_dict = {k: real_order1_dict[k] for k in sorted(real_order1_dict.keys())}
+    real_order2_dict = {k: real_order2_dict[k] for k in sorted(real_order2_dict.keys())}
+    guessed_order1_dict = {k: guessed_order1_dict[k] for k in sorted(guessed_order1_dict.keys())}
+    guessed_order2_dict = {k: guessed_order2_dict[k] for k in sorted(guessed_order2_dict.keys())}
+
+    real_order1 = list(real_order1_dict.values())
+    real_order2 = list(real_order2_dict.values())
+    guessed_order1 = list(guessed_order1_dict.values())
+    guessed_order2 = list(guessed_order2_dict.values())
+
+    tau1, _ = kendalltau(real_order1, guessed_order1)
+    tau2, _ = kendalltau(real_order2, guessed_order2)
+    tau3, _ = kendalltau(real_order1, guessed_order2)
+    tau4, _ = kendalltau(real_order2, guessed_order1)
+
+    direct_match = tau1 + tau2
+    swapped_match = tau3 + tau4
+
+    # We want the pairing that maximize the tau sum
+    if swapped_match > direct_match:
+        return (real_order1_dict, guessed_order2_dict, real_order2_dict, guessed_order1_dict, tau3, tau4, 'Swapped')
+    else:
+        return (real_order1_dict, guessed_order1_dict, real_order2_dict, guessed_order2_dict, tau1, tau2, 'Direct')
+
+# Process subtype assignment history 
+def filter_dicts(
+    history: List[Dict[int, int]], 
+    burn_in: int, 
+    thinning: int
+) -> List[Dict[int, int]]:
+    """Filter history based on burn-in and thinning."""
+    filtered = [d for i, d in enumerate(history) if i > burn_in and i % thinning == 0]
+    return filtered
+
+def compute_modes(filtered_history: List[Dict[int, int]]) -> Dict[int, int]:
+    """For each participant, get its mode subtype assignment"""
+    # Participant: [subtype assignments]
+    subtype_assignments = defaultdict(list)
+    for record in filtered_history:
+        for p, assignment in record.items():
+            subtype_assignments[p].append(assignment)
+    # Compute mode for each participant
+    participant_modes = {
+        p: Counter(assignments).most_common(1)[0][0] 
+        for p, assignments in subtype_assignments.items()}
+    return participant_modes
+
+def compute_subtype_accuracy(participant_modes:Dict[int, int], ground_truth:Dict[int, int])-> float:
+    """Compute accuracy of subtype assignment"""
+    correct = sum(participant_modes[p] == ground_truth[p] for p in participant_modes)
+    accuracy = correct / len(participant_modes)
+    return accuracy
+
 def run_ebm_subtype(
     data_file: str,
     algorithm: str, 
@@ -100,6 +163,7 @@ def run_ebm_subtype(
     n_shuffle: int = 2,
     burn_in: int = 1000,
     thinning: int = 50,
+    flip_proportion: float = 0.6,
 ) -> Dict:
     """
     Run the metropolis hastings algorithm and save results 
@@ -164,6 +228,9 @@ def run_ebm_subtype(
     n_stages = len(biomarkers) + 1
     diseased_stages = np.arange(start=1, stop=n_stages, step=1)
     non_diseased_ids = data.loc[data.diseased == False].participant.unique()
+    n_participants = len(data.participant.unique())
+    subtype_ground_truth = {i: 1 if i < n_participants//2 else 2 for i in range(n_participants)}
+    real_order1_dict = guessed_order1_dict = real_order2_dict = guessed_order2_dict = None
 
     real_theta_phi_file = get_params_path()
     # Load theta and phi values from the JSON file
@@ -208,11 +275,20 @@ def run_ebm_subtype(
             #     data, n_iter, n_shuffle
             # )
         elif algorithm == 'conjugate_priors':
-            accepted_order_dicts, log_likelihoods, participant_order_assignments = conjugate_priors.metropolis_hastings_subtype_conjugate_priors(
+            # accepted_order_dicts, log_likelihoods, subtype_assignment_history = conjugate_priors_fixed_params_and_subtypes.metropolis_hastings_subtype_conjugate_priors(
+            #     data_we_have = data,
+            #     iterations = n_iter,
+            #     n_shuffle = n_shuffle,
+            #     real_theta_phi = real_theta_phi,
+            #     upper_limit = upper_limit
+            # )
+            accepted_order_dicts, log_likelihoods, subtype_assignment_history = conjugate_priors_fixed_params_and_known_two_orders.metropolis_hastings_subtype_conjugate_priors(
                 data_we_have = data,
                 iterations = n_iter,
                 n_shuffle = n_shuffle,
-                upper_limit = upper_limit
+                real_theta_phi = real_theta_phi,
+                upper_limit = upper_limit,
+                flip_proportion = flip_proportion
             )
         else:
             raise ValueError("You must choose from 'hard_kmeans', 'soft_kmeans', and 'conjugate_priors'!")
@@ -220,106 +296,88 @@ def run_ebm_subtype(
         logging.error(f"Error in Metropolis-Hastings algorithm: {e}")
         raise
 
-    # Get most likely order 
-    most_likely_order1_dic = obtain_most_likely_order_dic(
-        accepted_order_dicts['order1'], burn_in, thinning
-    )
-    most_likely_order2_dic = obtain_most_likely_order_dic(
-        accepted_order_dicts['order2'], burn_in, thinning
-    )
+    if subtype_assignment_history:
+        # Calculate subtype accuracy
+        filtered_history = filter_dicts(subtype_assignment_history, burn_in, thinning)
+        participant_modes = compute_modes(filtered_history)
+        print(max(participant_modes.keys()))
+        subtype_accuracy = compute_subtype_accuracy(participant_modes, subtype_ground_truth)
 
-    def best_kendall_tau_pairing(
-        real_order1_dict:Dict[str, int], 
-        real_order2_dict:Dict[str, int], 
-        guessed_order1_dict:Dict[str, int], 
-        guessed_order2_dict:Dict[str, int], 
-        ) -> Tuple[Dict, Dict, Dict, Dict, float, float, str]:
-        #sort keys for each dict, so we can compare the values safely
-        real_order1_dict = {k: real_order1_dict[k] for k in sorted(real_order1_dict.keys())}
-        real_order2_dict = {k: real_order2_dict[k] for k in sorted(real_order2_dict.keys())}
-        guessed_order1_dict = {k: guessed_order1_dict[k] for k in sorted(guessed_order1_dict.keys())}
-        guessed_order2_dict = {k: guessed_order2_dict[k] for k in sorted(guessed_order2_dict.keys())}
+    if accepted_order_dicts and log_likelihoods:
 
-        real_order1 = list(real_order1_dict.values())
-        real_order2 = list(real_order2_dict.values())
-        guessed_order1 = list(guessed_order1_dict.values())
-        guessed_order2 = list(guessed_order2_dict.values())
+        # Get most likely order 
+        most_likely_order1_dic = obtain_most_likely_order_dic(
+            accepted_order_dicts['order1'], burn_in, thinning
+        )
+        most_likely_order2_dic = obtain_most_likely_order_dic(
+            accepted_order_dicts['order2'], burn_in, thinning
+        )
 
-        tau1, _ = kendalltau(real_order1, guessed_order1)
-        tau2, _ = kendalltau(real_order2, guessed_order2)
-        tau3, _ = kendalltau(real_order1, guessed_order2)
-        tau4, _ = kendalltau(real_order2, guessed_order1)
-
-        direct_match = tau1 + tau2
-        swapped_match = tau3 + tau4
-
-        # We want the pairing that maximize the tau sum
-        if swapped_match > direct_match:
-            return (real_order1_dict, guessed_order2_dict, real_order2_dict, guessed_order1_dict, tau3, tau4, 'Swapped')
+        real_order1_dict, guessed_order1_dict, real_order2_dict, guessed_order2_dict, tau1, tau2, paring_result = best_kendall_tau_pairing(
+            orders['1.0']['order'],
+            orders[f"{target_tau}"]['order'],
+            most_likely_order1_dic,
+            most_likely_order2_dic
+        )
+        if paring_result == 'Swapped':
+            correct_order1 = orders[f"{target_tau}"]['order']
+            correct_order2 = orders['1.0']['order']
         else:
-            return (real_order1_dict, guessed_order1_dict, real_order2_dict, guessed_order2_dict, tau1, tau2, 'Direct')
+            correct_order1 = orders['1.0']['order']
+            correct_order2 = orders[f"{target_tau}"]['order']
 
-    real_order1_dict, guessed_order1_dict, real_order2_dict, guessed_order2_dict, tau1, tau2, paring_result = best_kendall_tau_pairing(
-        orders['1.0']['order'],
-        orders[f"{target_tau}"]['order'],
-        most_likely_order1_dic,
-        most_likely_order2_dic
-    )
+        # Save heatmap
+        try:
+            save_heatmap(
+                accepted_order_dicts['order1'],
+                burn_in,
+                thinning,
+                folder_name=heatmap_folder,
+                file_name=f"{fname}_heatmap_{algorithm}_order1",
+                title=f"Heatmap of {fname} using {algorithm}_order1",
+                correct_ordering = correct_order1
+            )
+        except Exception as e:
+            logging.error(f"Error generating heatmap: {e}")
+            raise
 
-    if paring_result == 'Swapped':
-        correct_order1 = orders[f"{target_tau}"]['order']
-        correct_order2 = orders['1.0']['order']
+        # Save heatmap
+        try:
+            save_heatmap(
+                accepted_order_dicts['order2'],
+                burn_in,
+                thinning,
+                folder_name=heatmap_folder,
+                file_name=f"{fname}_heatmap_{algorithm}_order2",
+                title=f"Heatmap of {fname} using {algorithm}_order2",
+                correct_ordering = correct_order2
+            )
+        except Exception as e:
+            logging.error(f"Error generating heatmap: {e}")
+            raise
+
+        # Save trace plot
+        try:
+            save_traceplot(log_likelihoods['order1'], traceplot_folder, f"{fname}_traceplot_{algorithm}_order1")
+        except Exception as e:
+            logging.error(f"Error generating trace plot: {e}")
+            raise 
+
+        # Save trace plot
+        try:
+            save_traceplot(log_likelihoods['order2'], traceplot_folder, f"{fname}_traceplot_{algorithm}_order2")
+        except Exception as e:
+            logging.error(f"Error generating trace plot: {e}")
+            raise 
     else:
-        correct_order1 = orders['1.0']['order']
-        correct_order2 = orders[f"{target_tau}"]['order']
-
-    # Save heatmap
-    try:
-        save_heatmap(
-            accepted_order_dicts['order1'],
-            burn_in,
-            thinning,
-            folder_name=heatmap_folder,
-            file_name=f"{fname}_heatmap_{algorithm}_order1",
-            title=f"Heatmap of {fname} using {algorithm}_order1",
-            correct_ordering = correct_order1
-        )
-    except Exception as e:
-        logging.error(f"Error generating heatmap: {e}")
-        raise
-
-    # Save heatmap
-    try:
-        save_heatmap(
-            accepted_order_dicts['order2'],
-            burn_in,
-            thinning,
-            folder_name=heatmap_folder,
-            file_name=f"{fname}_heatmap_{algorithm}_order2",
-            title=f"Heatmap of {fname} using {algorithm}_order2",
-            correct_ordering = correct_order2
-        )
-    except Exception as e:
-        logging.error(f"Error generating heatmap: {e}")
-        raise
-
-    # Save trace plot
-    try:
-        save_traceplot(log_likelihoods['order1'], traceplot_folder, f"{fname}_traceplot_{algorithm}_order1")
-    except Exception as e:
-        logging.error(f"Error generating trace plot: {e}")
-        raise 
-
-    # Save trace plot
-    try:
-        save_traceplot(log_likelihoods['order2'], traceplot_folder, f"{fname}_traceplot_{algorithm}_order2")
-    except Exception as e:
-        logging.error(f"Error generating trace plot: {e}")
-        raise 
+        tau1 = tau2 = 0
+        guessed_order1_dict = None  
+        guessed_order2_dict = None 
 
     # Save results 
     results = {
         'total_tau': tau1+tau2,
+        "subtype_accuracy": subtype_accuracy,
         "n_iter": n_iter,
         "most_likely_order1": guessed_order1_dict,
         "kendalls_tau1": tau1, 

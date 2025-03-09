@@ -1,1 +1,1 @@
-pip install --no-cache-dir --upgrade alabEBM
+pip install --no-cache-dir --upgrade alabebm

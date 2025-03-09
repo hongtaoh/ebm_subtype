@@ -1,0 +1,14 @@
+2025-03-09 15:01:37,594 - INFO - Running conjugate priors for file: 100_200_21_tau_-1.0
+2025-03-09 15:01:37,597 - INFO - Number of biomarkers: 10
+2025-03-09 15:01:37,848 - INFO - Initial Subtype Accuracy: 0.655, 
+2025-03-09 15:01:37,916 - INFO - Iteration 2000/20000, Acceptance Ratio: 0.00%, Log Likelihood: -6756.3915, Current Subtype Accuracy: 0.655, 
+2025-03-09 15:01:37,985 - INFO - Iteration 4000/20000, Acceptance Ratio: 0.00%, Log Likelihood: -6756.3915, Current Subtype Accuracy: 0.655, 
+2025-03-09 15:01:38,053 - INFO - Iteration 6000/20000, Acceptance Ratio: 0.00%, Log Likelihood: -6756.3915, Current Subtype Accuracy: 0.655, 
+2025-03-09 15:01:38,122 - INFO - Iteration 8000/20000, Acceptance Ratio: 0.00%, Log Likelihood: -6756.3915, Current Subtype Accuracy: 0.655, 
+2025-03-09 15:01:38,191 - INFO - Iteration 10000/20000, Acceptance Ratio: 0.00%, Log Likelihood: -6756.3915, Current Subtype Accuracy: 0.655, 
+2025-03-09 15:01:38,260 - INFO - Iteration 12000/20000, Acceptance Ratio: 0.00%, Log Likelihood: -6756.3915, Current Subtype Accuracy: 0.655, 
+2025-03-09 15:01:38,329 - INFO - Iteration 14000/20000, Acceptance Ratio: 0.00%, Log Likelihood: -6756.3915, Current Subtype Accuracy: 0.655, 
+2025-03-09 15:01:38,398 - INFO - Iteration 16000/20000, Acceptance Ratio: 0.00%, Log Likelihood: -6756.3915, Current Subtype Accuracy: 0.655, 
+2025-03-09 15:01:38,467 - INFO - Iteration 18000/20000, Acceptance Ratio: 0.00%, Log Likelihood: -6756.3915, Current Subtype Accuracy: 0.655, 
+2025-03-09 15:01:38,536 - INFO - Iteration 20000/20000, Acceptance Ratio: 0.00%, Log Likelihood: -6756.3915, Current Subtype Accuracy: 0.655, 
+2025-03-09 15:01:38,558 - INFO - Results saved to conjugate_priors/results/100_200_21_tau_-1.0_results.json

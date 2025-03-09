@@ -1,7 +1,7 @@
 """Generate raw data before combining
 """
 
-from alabEBM import generate, get_params_path
+from alabebm import generate, get_params_path
 from scipy.stats import kendalltau
 import json 
 

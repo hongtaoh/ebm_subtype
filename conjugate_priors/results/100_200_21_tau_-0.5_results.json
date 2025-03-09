@@ -1,7 +1,7 @@
 {
     "total_tau": 0,
-    "subtype_accuracy": 0.455,
-    "n_iter": 100,
+    "subtype_accuracy": 0.9,
+    "n_iter": 20000,
     "most_likely_order1": null,
     "kendalls_tau1": 0,
     "original_order1": null,

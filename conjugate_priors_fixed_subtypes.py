@@ -72,11 +72,107 @@ def split_data_by_subtype(
     data_subtype2 = data[data.participant.isin(subtype2_ids)].copy()
     return data_subtype1, data_subtype2
 
-
 # fixed theta_phi + two orders -> subtype
 # fixed theta_phi + subtype assignment --> two orders
 # fixed theta_phi -> two orders + subtype assignments
 
+def compute_theta_phi_biomarker(
+    participants: np.ndarray,
+    measurements: np.ndarray,
+    diseased: np.ndarray,
+    stage_likelihoods_posteriors: Dict[int, np.ndarray],
+    diseased_stages: np.ndarray,
+    curr_order: int,
+    ) -> Tuple[float, float, float, float]:
+    """
+    Compute mean and std for both the affected and non-affected clusters for a single biomarker.
+
+    Args:
+        participants (np.ndarray): Array of participant IDs.
+        measurements (np.ndarray): Array of measurements for the biomarker.
+        diseased (np.ndarray): Boolean array indicating whether each participant is diseased.
+        stage_likelihoods_posteriors (Dict[int, np.ndarray]): Dictionary mapping participant IDs to their stage likelihoods.
+        diseased_stages (np.ndarray): Array of stages considered diseased.
+        curr_order (int): Current order of the biomarker.
+
+    Returns:
+        Tuple[float, float, float, float]: Mean and standard deviation for affected (theta) and non-affected (phi) clusters.
+    """
+    affected_cluster = []
+    non_affected_cluster = []
+
+    for idx, p in enumerate(participants):
+        m = measurements[idx]
+        if not diseased[idx]:
+            non_affected_cluster.append(m)
+        else:
+            if curr_order == 1:
+                affected_cluster.append(m)
+            else:
+                stage_likelihoods = stage_likelihoods_posteriors[p]
+                affected_prob = np.sum(stage_likelihoods[diseased_stages >= curr_order])
+                non_affected_prob = np.sum(stage_likelihoods[diseased_stages < curr_order])
+                if affected_prob > non_affected_prob:
+                    affected_cluster.append(m)
+                elif affected_prob < non_affected_prob:
+                    non_affected_cluster.append(m)
+                else:
+                    if np.random.random() > 0.5:
+                        affected_cluster.append(m)
+                    else:
+                        non_affected_cluster.append(m)
+                        
+    # np.var won't make sense if there is only one participant
+    if len(affected_cluster) <= 1:
+        theta_mean, theta_std = np.nan, np.nan 
+    else:
+        s0_sq = np.var(affected_cluster, ddof=1)
+        m0 = np.mean(affected_cluster)
+        theta_mean, theta_std = estimate_params_exact(
+            m0=m0, n0=1, s0_sq=s0_sq, v0=1, data=affected_cluster)
+    if len(non_affected_cluster) <= 1:
+        phi_mean, phi_std = np.nan, np.nan 
+    else:
+        s0_sq = np.var(non_affected_cluster, ddof=1)
+        m0 = np.mean(non_affected_cluster)
+        phi_mean, phi_std = estimate_params_exact(
+            m0=m0, n0=1, s0_sq=s0_sq, v0=1, data=non_affected_cluster)
+    return theta_mean, theta_std, phi_mean, phi_std
+        
+def update_theta_phi_estimates(
+    biomarker_data: Dict[str, Tuple[int, np.ndarray, np.ndarray, bool]],
+    theta_phi_default: Dict[str, Dict[str, float]],
+    stage_likelihoods_posteriors: Dict[int, np.ndarray],
+    diseased_stages:np.ndarray
+    ) -> Dict[str, Dict[str, float]]:
+    """Update theta and phi params using the conjugate priors for all biomarkers."""
+    updated_params = defaultdict(dict)
+    for biomarker, (
+        curr_order, measurements, participants, diseased) in biomarker_data.items():
+        dic = {'biomarker': biomarker}
+        theta_phi_default_biomarker = theta_phi_default[biomarker]
+        theta_mean, theta_std, phi_mean, phi_std = compute_theta_phi_biomarker(
+            participants,
+            measurements,
+            diseased,
+            stage_likelihoods_posteriors,
+            diseased_stages,
+            curr_order,
+        ) 
+        if theta_std == 0 or np.isnan(theta_std):
+            theta_mean = theta_phi_default_biomarker['theta_mean']
+            theta_std = theta_phi_default_biomarker['theta_std']
+        if phi_std == 0 or np.isnan(phi_std):
+            phi_mean = theta_phi_default_biomarker['phi_mean']
+            phi_std = theta_phi_default_biomarker['phi_std']
+        updated_params[biomarker] = {
+            'theta_mean': theta_mean,
+            'theta_std': theta_std,
+            'phi_mean': phi_mean,
+            'phi_std': phi_std,
+        }
+    return updated_params
+    
 def metropolis_hastings_subtype_conjugate_priors(
     data_we_have: pd.DataFrame,
     iterations: int,
@@ -102,10 +198,7 @@ def metropolis_hastings_subtype_conjugate_priors(
     n_stages = len(biomarkers) + 1
     diseased_stages = np.arange(start=1, stop=n_stages, step=1)
     non_diseased_ids = data_we_have.loc[data_we_have.diseased == False].participant.unique()
-
-    theta_phi_default = utils.get_theta_phi_estimates(data_we_have)
-    theta_phi_estimates1 = theta_phi_default.copy()
-    theta_phi_estimates2 = theta_phi_default.copy()
+    theta_phi_estimates = real_theta_phi
 
     # initialize an ordering and likelihood
     order1 = np.random.permutation(np.arange(1, n_stages))
@@ -126,7 +219,15 @@ def metropolis_hastings_subtype_conjugate_priors(
     # This records all log likelihoods
     log_likelihoods = defaultdict(list)
     participant_subtype_assignment_history = []
+    participant_subtype_assignment = {}
+    for p in range(n_participants):
+        if p < n_participants//2:
+            participant_subtype_assignment[p] = 1
+        else:
+            participant_subtype_assignment[p] = 2
 
+    data_subtype1, data_subtype2 = split_data_by_subtype(data_we_have, participant_subtype_assignment)
+    
     for iteration in range(iterations):
         log_likelihoods['order1'].append(ln_likelihood1)
         log_likelihoods['order2'].append(ln_likelihood2)
@@ -139,128 +240,41 @@ def metropolis_hastings_subtype_conjugate_priors(
         utils.shuffle_order(new_order2, n_shuffle)
         new_order2_dict = dict(zip(biomarkers, new_order2))
 
-        # Shallow copy is enough because no cols in data_we_have contain mutable objects like lists and dicts
-        data_we_have1 = data_we_have.copy()
-        data_we_have2 = data_we_have.copy()
-
-        # Update participant data with the new order dict
-        participant_data1 = sk.preprocess_participant_data(data_we_have1, new_order1_dict)
-        participant_data2 = sk.preprocess_participant_data(data_we_have2, new_order2_dict)
-
-        ln_likelihoods1, stage_likelihoods_posteriors1 = per_participant_compute_ln_likelihood_and_stage_likelihoods(
-            participant_data1,
-            non_diseased_ids,
-            theta_phi_estimates1,
-            diseased_stages,
-        )
-
-        ln_likelihoods2, stage_likelihoods_posteriors2 = per_participant_compute_ln_likelihood_and_stage_likelihoods(
-            participant_data2,
-            non_diseased_ids,
-            theta_phi_estimates2,
-            diseased_stages,
-        )
-
-        participant_subtype_assignment = {}
-        # Total likelihoods of participants having subtype 1
-        new_ln_likelihood1 = 0
-        # Total likelihoods of participants having subtype 2
-        new_ln_likelihood2 = 0 
-        stage_likelihoods_posteriors = {}
-        for p in range(n_participants):
-            ll1 = ln_likelihoods1[p]
-            ll2 = ln_likelihoods2[p]
-            
-            # Numerically stable softmax (CORRECT for Gibbs sampling)
-            max_ll = max(ll1, ll2)
-            prob_order1 = np.exp(ll1 - max_ll) / (np.exp(ll1 - max_ll) + np.exp(ll2 - max_ll))
-            
-            # Sample from the distribution
-            if np.random.rand() < prob_order1:
-                participant_subtype_assignment[p] = 1
-                new_ln_likelihood1 += ll1 
-                if p not in non_diseased_ids:
-                    stage_likelihoods_posteriors[p] = stage_likelihoods_posteriors1[p]
-            else:
-                participant_subtype_assignment[p] = 2
-                new_ln_likelihood2 += ll2
-                if p not in non_diseased_ids:
-                    stage_likelihoods_posteriors[p] = stage_likelihoods_posteriors2[p]
-
-        data_subtype1, data_subtype2 = split_data_by_subtype(data_we_have, participant_subtype_assignment)
         participant_data1 = sk.preprocess_participant_data(data_subtype1, new_order1_dict)
         participant_data2 = sk.preprocess_participant_data(data_subtype2, new_order2_dict)
-        biomarker_data1 = sk.preprocess_biomarker_data(data_subtype1, new_order1_dict)
-        biomarker_data2 = sk.preprocess_biomarker_data(data_subtype2, new_order2_dict)
-
-        # Compute stage_likelihoods_posteriors using current theta_phi_estimates
-        _, stage_likelihoods_posteriors1 = sk.compute_total_ln_likelihood_and_stage_likelihoods(
+        
+        new_ln_likelihood1, _ = sk.compute_total_ln_likelihood_and_stage_likelihoods(
             participant_data1,
             non_diseased_ids,
-            theta_phi_estimates1,
+            theta_phi_estimates,
             diseased_stages
         )
 
-        # Compute new_theta_phi_estimates based on new_order
-        new_theta_phi_estimates1 = cp.update_theta_phi_estimates(
-            biomarker_data1,
-            theta_phi_estimates1,
-            stage_likelihoods_posteriors1,
-            diseased_stages
-        )
-
-        # Recompute new_ln_likelihood using new_theta_phi_estimates
-        new_ln_likelihood_new_theta1, _ = sk.compute_total_ln_likelihood_and_stage_likelihoods(
-            participant_data1,
-            non_diseased_ids,
-            new_theta_phi_estimates1,
-            diseased_stages
-        )
-
-        # Compute stage_likelihoods_posteriors using current theta_phi_estimates
-        _, stage_likelihoods_posteriors2 = sk.compute_total_ln_likelihood_and_stage_likelihoods(
+        new_ln_likelihood2, _ = sk.compute_total_ln_likelihood_and_stage_likelihoods(
             participant_data2,
             non_diseased_ids,
-            theta_phi_estimates2,
+            theta_phi_estimates,
             diseased_stages
         )
 
-        # Compute new_theta_phi_estimates based on new_order
-        new_theta_phi_estimates2 = cp.update_theta_phi_estimates(
-            biomarker_data2,
-            theta_phi_estimates2,
-            stage_likelihoods_posteriors2,
-            diseased_stages
-        )
+        # Compute delta using the already-calculated new_ln_likelihood1/2
+        delta1 = new_ln_likelihood1 - ln_likelihood1
+        delta2 = new_ln_likelihood2 - ln_likelihood2
 
-        # Recompute new_ln_likelihood using new_theta_phi_estimates
-        new_ln_likelihood_new_theta2, _ = sk.compute_total_ln_likelihood_and_stage_likelihoods(
-            participant_data2,
-            non_diseased_ids,
-            new_theta_phi_estimates2,
-            diseased_stages
-        )
-
-        # For Order 1
-        delta1 = new_ln_likelihood_new_theta1 - ln_likelihood1
-        prob_accept1 = min(1, np.exp(delta1))
-
-        # For Order 2
-        delta2 = new_ln_likelihood_new_theta2 - ln_likelihood2
-        prob_accept2 = min(1, np.exp(delta2))
+        # Handle overflow-safe acceptance probabilities
+        prob_accept1 = 1.0 if delta1 > 0 else np.exp(delta1)
+        prob_accept2 = 1.0 if delta2 > 0 else np.exp(delta2)
 
         if np.random.rand() < prob_accept1:
             order1 = new_order1
             ln_likelihood1 = new_ln_likelihood1
             order1_dict = new_order1_dict 
-            theta_phi_estimates1 = new_theta_phi_estimates1
             acceptance_count1 += 1
 
         if np.random.rand() < prob_accept2:
             order2 = new_order2
             ln_likelihood2 = new_ln_likelihood2
             order2_dict = new_order2_dict 
-            theta_phi_estimates2 = new_theta_phi_estimates2
             acceptance_count2 += 1
 
         all_orders['order1'].append(order1_dict.copy())
