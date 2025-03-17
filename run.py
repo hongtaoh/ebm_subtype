@@ -1,13 +1,14 @@
 import json
 import pandas as pd
 import numpy as np 
+import seaborn as sns
+import matplotlib.pyplot as plt
 import os
 import logging
 from typing import List, Dict, Optional, Tuple
 from scipy.stats import kendalltau
 import re 
 from collections import defaultdict, Counter
-
 
 # Import utility functions
 from alabebm.utils.visualization import save_heatmap, save_traceplot 
@@ -17,9 +18,8 @@ from alabebm.utils.runners import extract_fname, cleanup_old_files
 from alabebm.utils import data_processing as data_utils
 
 # Import algorithms
-import conjugate_priors_fixed_params_and_subtypes
 from alabebm import get_params_path
-import conjugate_priors_fixed_params_and_known_two_orders
+import conjugate_priors_fixed_params_only
 
 """
 `process_participant_data` adds S_n to the original data based on the two biomarker orderings. 
@@ -150,11 +150,61 @@ def compute_modes(filtered_history: List[Dict[int, int]]) -> Dict[int, int]:
         for p, assignments in subtype_assignments.items()}
     return participant_modes
 
-def compute_subtype_accuracy(participant_modes:Dict[int, int], ground_truth:Dict[int, int])-> float:
+def compute_subtype_accuracy(participant_modes:Dict[int, int], ground_truth:Dict[int, int], paring_result)-> float:
     """Compute accuracy of subtype assignment"""
-    correct = sum(participant_modes[p] == ground_truth[p] for p in participant_modes)
-    accuracy = correct / len(participant_modes)
+    if not participant_modes: 
+        accuracy = 0
+    else:
+        if paring_result == "Swapped":
+            participant_modes = {k:2 if v == 1 else 1 for k, v in participant_modes.items()}
+        correct = sum(participant_modes[p] == ground_truth[p] for p in participant_modes)
+        accuracy = correct / len(participant_modes)
     return accuracy
+
+def plot_correlation(
+    a:List[float],
+    b:List[float],
+    folder_name: str,
+    file_name: str,
+    x_label:str="",
+    y_label:str="",
+    skip:int=1,
+    method: str = "pearson",
+    title: str = "Correlation Plot"
+    ):
+    if len(a) != len(b):
+        print(len(a))
+        print(len(b))
+        raise ValueError("Lists must have the same length!")
+    
+    a = a[skip:]
+    b = b[skip:]
+
+    if not x_label:
+        x_label = "List A"
+    if not y_label:
+        y_label = "List B"
+
+    data = pd.DataFrame({'A': a, 'B': b})
+    correlation = data.corr(method=method).iloc[0,1]
+
+    plt.figure(figsize=(10,8))
+    sns.regplot(x="A", y="B", data=data, scatter_kws={'alpha':0.6})
+
+    # Add correlation value to plot
+    plt.annotate(f"{method.capitalize()} correlation: {correlation:.4f}",
+                xy=(0.05, 0.95), xycoords='axes fraction',
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
+    
+    # Add labels and title
+    plt.title(title)
+    plt.xlabel(x_label)
+    plt.ylabel(y_label)
+    plt.grid(True, linestyle='--', alpha=0.3)
+
+    # Save and close
+    plt.savefig(f"{folder_name}/{file_name}.png")
+    plt.close()
 
 def run_ebm_subtype(
     data_file: str,
@@ -163,7 +213,6 @@ def run_ebm_subtype(
     n_shuffle: int = 2,
     burn_in: int = 1000,
     thinning: int = 50,
-    flip_proportion: float = 0.6,
 ) -> Dict:
     """
     Run the metropolis hastings algorithm and save results 
@@ -196,11 +245,13 @@ def run_ebm_subtype(
     traceplot_folder = f"{output_dir}/traceplots"
     results_folder = f"{output_dir}/results"
     logs_folder = f"{output_dir}/records"
+    corrplot_folder = f"{output_dir}/corrplots"
 
     os.makedirs(heatmap_folder, exist_ok=True)
     os.makedirs(traceplot_folder, exist_ok=True)
     os.makedirs(results_folder, exist_ok=True)
     os.makedirs(logs_folder, exist_ok=True)
+    os.makedirs(corrplot_folder, exist_ok=True)
 
     # Finally set up logging
     log_file = f"{logs_folder}/{fname}.log"
@@ -282,26 +333,18 @@ def run_ebm_subtype(
             #     real_theta_phi = real_theta_phi,
             #     upper_limit = upper_limit
             # )
-            accepted_order_dicts, log_likelihoods, subtype_assignment_history = conjugate_priors_fixed_params_and_known_two_orders.metropolis_hastings_subtype_conjugate_priors(
+            accepted_order_dicts, log_likelihoods, subtype_assignment_history, total_tau_history, subtype_accuracy_history, total_log_likelihood_history = conjugate_priors_fixed_params_only.metropolis_hastings_subtype_conjugate_priors(
                 data_we_have = data,
                 iterations = n_iter,
                 n_shuffle = n_shuffle,
                 real_theta_phi = real_theta_phi,
-                upper_limit = upper_limit,
-                flip_proportion = flip_proportion
+                target_tau = target_tau
             )
         else:
             raise ValueError("You must choose from 'hard_kmeans', 'soft_kmeans', and 'conjugate_priors'!")
     except Exception as e:
         logging.error(f"Error in Metropolis-Hastings algorithm: {e}")
         raise
-
-    if subtype_assignment_history:
-        # Calculate subtype accuracy
-        filtered_history = filter_dicts(subtype_assignment_history, burn_in, thinning)
-        participant_modes = compute_modes(filtered_history)
-        print(max(participant_modes.keys()))
-        subtype_accuracy = compute_subtype_accuracy(participant_modes, subtype_ground_truth)
 
     if accepted_order_dicts and log_likelihoods:
 
@@ -325,6 +368,15 @@ def run_ebm_subtype(
         else:
             correct_order1 = orders['1.0']['order']
             correct_order2 = orders[f"{target_tau}"]['order']
+
+        if subtype_assignment_history:
+            # Calculate subtype accuracy
+            filtered_history = filter_dicts(subtype_assignment_history, burn_in, thinning)
+            participant_modes = compute_modes(filtered_history)
+            # print(max(participant_modes.keys()))
+            subtype_accuracy = compute_subtype_accuracy(participant_modes, subtype_ground_truth, paring_result)
+        else:
+            subtype_accuracy = None
 
         # Save heatmap
         try:
@@ -358,21 +410,51 @@ def run_ebm_subtype(
 
         # Save trace plot
         try:
-            save_traceplot(log_likelihoods['order1'], traceplot_folder, f"{fname}_traceplot_{algorithm}_order1")
+            save_traceplot(
+                log_likelihoods['order1'], 
+                traceplot_folder, 
+                f"{fname}_traceplot_{algorithm}_order1",
+                skip = 40,
+                title_detail = "(for order1)"
+            )
         except Exception as e:
             logging.error(f"Error generating trace plot: {e}")
             raise 
 
         # Save trace plot
         try:
-            save_traceplot(log_likelihoods['order2'], traceplot_folder, f"{fname}_traceplot_{algorithm}_order2")
+            save_traceplot(
+                log_likelihoods['order2'], 
+                traceplot_folder, 
+                f"{fname}_traceplot_{algorithm}_order2",
+                skip = 40,
+                title_detail = "(for order1)"
+            )
         except Exception as e:
             logging.error(f"Error generating trace plot: {e}")
             raise 
     else:
         tau1 = tau2 = 0
-        guessed_order1_dict = None  
-        guessed_order2_dict = None 
+        subtype_accuracy = None
+
+    # Plot correlations 
+    plot_correlation(
+        a=total_log_likelihood_history,
+        b=total_tau_history,
+        x_label = "Total Log Likelihood",
+        y_label = "Total Tau",
+        folder_name=corrplot_folder,
+        file_name=f"{fname}_corr_log_likelihoods_total_tau"
+    )
+
+    plot_correlation(
+        a=total_log_likelihood_history,
+        b=subtype_accuracy_history,
+        x_label = "Total Log Likelihood",
+        y_label = "Subtype Accuracy",
+        folder_name=corrplot_folder,
+        file_name=f"{fname}_corr_log_likelihoods_subtypp_accuracy"
+    )
 
     # Save results 
     results = {

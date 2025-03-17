@@ -6,6 +6,7 @@ from alabebm.algorithms import conjugate_priors_algo as cp
 from typing import List, Dict, Tuple
 import logging 
 from collections import defaultdict 
+import run 
 
 def per_participant_compute_ln_likelihood_and_stage_likelihoods(
     participant_data: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]],
@@ -63,17 +64,12 @@ def split_data_by_subtype(
     data_subtype2 = data[data.participant.isin(subtype2_ids)].copy()
     return data_subtype1, data_subtype2
 
-# fixed theta_phi + two orders -> subtype
-# fixed theta_phi + subtype assignment --> two orders
-# fixed theta_phi -> two orders + subtype assignments
-
 def metropolis_hastings_subtype_conjugate_priors(
     data_we_have: pd.DataFrame,
     iterations: int,
     n_shuffle: int,
     real_theta_phi: Dict[str, Dict[str, float]],
-    upper_limit: float
-) -> Tuple[List[Dict[str, Dict[str, int]]], List[Dict[str, float]], List[Dict[str, int]]]:
+) -> Tuple[List[Dict[str, Dict[str, int]]], List[Dict[str, float]], List[Dict[int, int]]]:
     """
     Perform Metropolis-Hastings sampling with conjugate priors to estimate biomarker orderings.
 
@@ -85,8 +81,9 @@ def metropolis_hastings_subtype_conjugate_priors(
 
     Returns:
         Tuple[List[Dict], List[float]]: 
-            - List of accepted biomarker orderings at each iteration.
-            - List of log likelihoods at each iteration.
+            - List of accepted biomarker orderings at each iteration (for each subtype).
+            - List of log likelihoods at each iteration (for each subtype).
+            - List of subtype assignment. 
     """
     n_participants = len(data_we_have.participant.unique())
     biomarkers = data_we_have.biomarker.unique()
@@ -94,92 +91,161 @@ def metropolis_hastings_subtype_conjugate_priors(
     diseased_stages = np.arange(start=1, stop=n_stages, step=1)
     non_diseased_ids = data_we_have.loc[data_we_have.diseased == False].participant.unique()
     theta_phi_estimates = real_theta_phi
+    subtype_ground_truth = {i: 1 if i < n_participants//2 else 2 for i in range(n_participants)}
 
-    # initialize an ordering and likelihood
     order1 = np.random.permutation(np.arange(1, n_stages))
-    # order1 = np.arange(1,11)
     order1_dict = dict(zip(biomarkers, order1))
-    ln_likelihood1 = -np.inf
-    acceptance_count1 = 0
 
-    # initialize an ordering and likelihood
     order2 = np.random.permutation(np.arange(1, n_stages))
-    # order2 = np.array([1,2,3,5,4,6,7,8,10,9])
     order2_dict = dict(zip(biomarkers, order2))
-    ln_likelihood2 = -np.inf
-    acceptance_count2 = 0
+
+    # Initialize variables
+    subtype_assignment = {}
+    ln_likelihood1 = float('-inf')
+    ln_likelihood2 = float('-inf')
 
     # Note that this records only the current accepted orders in each iteration
     all_orders = defaultdict(list)
-    # This records all log likelihoods
     log_likelihoods = defaultdict(list)
-    participant_subtype_assignment_history = []
-    participant_subtype_assignment = {}
-    for p in range(n_participants):
-        if p < n_participants//2:
-            participant_subtype_assignment[p] = 1
-        else:
-            participant_subtype_assignment[p] = 2
+    subtype_assignments_history = []
 
-    data_subtype1, data_subtype2 = split_data_by_subtype(data_we_have, participant_subtype_assignment)
+    acceptance_count1 = 0
+    acceptance_count2 = 0
     
     for iteration in range(iterations):
+        # Record current accepted states
         log_likelihoods['order1'].append(ln_likelihood1)
         log_likelihoods['order2'].append(ln_likelihood2)
+        log_likelihoods['total'].append(ln_likelihood1 + ln_likelihood2)
+        all_orders['order1'].append(order1_dict.copy())
+        all_orders['order2'].append(order2_dict.copy())
+        subtype_assignments_history.append(subtype_assignment.copy())
 
+        ###############################################
+        # STEP 1: Update subtype assignments (Gibbs sampling)
+        ###############################################
+        full_data1 = sk.preprocess_participant_data(data_we_have, order1_dict)
+        full_data2 = sk.preprocess_participant_data(data_we_have, order2_dict)
+
+        ln_likelihoods1, _ = per_participant_compute_ln_likelihood_and_stage_likelihoods(
+            full_data1,
+            non_diseased_ids,
+            theta_phi_estimates,
+            diseased_stages,
+        )
+
+        ln_likelihoods2,_ = per_participant_compute_ln_likelihood_and_stage_likelihoods(
+            full_data2,
+            non_diseased_ids,
+            theta_phi_estimates,
+            diseased_stages,
+        )
+
+        # Only for diseased participants
+        new_subtype_assignment = {} # participant (int): assignment (int)
+        # temp_ln_likelihood1 = 0
+        # temp_ln_likelihood2 = 0
+        for p in range(n_participants):
+            if p in non_diseased_ids:
+                continue
+            
+            ll1 = ln_likelihoods1[p]
+            ll2 = ln_likelihoods2[p]
+            # Numerically stable softmax 
+            max_ll = max(ll1, ll2)
+            prob_subtype1 = np.exp(ll1 - max_ll) / (np.exp(ll1 - max_ll) + np.exp(ll2 - max_ll))
+
+            # Sample from distribution
+            if np.random.rand() < prob_subtype1:
+                new_subtype_assignment[p] = 1
+                # temp_ln_likelihood1 += ll1
+            else:
+                new_subtype_assignment[p] = 2
+                # temp_ln_likelihood2 += ll2 
+        
+        # Update subtype assignment
+        subtype_assignment = new_subtype_assignment
+        data_subtype1, data_subtype2 = split_data_by_subtype(data_we_have, subtype_assignment)
+
+        # Likelihood of New Assignment + Current Accepted Order
+        # # After splitting data in STEP 1 of the second file:
+        participant_data1 = sk.preprocess_participant_data(data_subtype1, order1_dict)
+        participant_data2 = sk.preprocess_participant_data(data_subtype2, order2_dict)
+
+        # Recalculate log likelihoods for current orders and new assignments
+        ln_likelihood1, _ = sk.compute_total_ln_likelihood_and_stage_likelihoods(
+            participant_data1, non_diseased_ids, theta_phi_estimates, diseased_stages
+        )
+        ln_likelihood2, _ = sk.compute_total_ln_likelihood_and_stage_likelihoods(
+            participant_data2, non_diseased_ids, theta_phi_estimates, diseased_stages
+        )
+        # ln_likelihood1 = temp_ln_likelihood1
+        # ln_likelihood2 = temp_ln_likelihood2
+        
+        ###############################################
+        # STEP 2: Update order1 (Metropolis-Hastings)
+        ###############################################
+        
+        # Propose new order1
         new_order1 = order1.copy()
         utils.shuffle_order(new_order1, n_shuffle)
         new_order1_dict = dict(zip(biomarkers, new_order1))
 
-        new_order2 = order2.copy()
-        utils.shuffle_order(new_order2, n_shuffle)
-        new_order2_dict = dict(zip(biomarkers, new_order2))
+        # Calculate likelihood with new order1 and the updated subtype assignment
+        new_participant_data1 = sk.preprocess_participant_data(data_subtype1, new_order1_dict)
 
-        participant_data1 = sk.preprocess_participant_data(data_subtype1, new_order1_dict)
-        participant_data2 = sk.preprocess_participant_data(data_subtype2, new_order2_dict)
-        
+        # Likelihood of New Assignment + New Order
         new_ln_likelihood1, _ = sk.compute_total_ln_likelihood_and_stage_likelihoods(
-            participant_data1,
+            new_participant_data1,
             non_diseased_ids,
             theta_phi_estimates,
             diseased_stages
         )
 
-        new_ln_likelihood2, _ = sk.compute_total_ln_likelihood_and_stage_likelihoods(
-            participant_data2,
-            non_diseased_ids,
-            theta_phi_estimates,
-            diseased_stages
-        )
-
-        # Compute delta using the already-calculated new_ln_likelihood1/2
+        # Calculate acceptance probability
         delta1 = new_ln_likelihood1 - ln_likelihood1
-        delta2 = new_ln_likelihood2 - ln_likelihood2
-
-        # Handle overflow-safe acceptance probabilities
         prob_accept1 = 1.0 if delta1 > 0 else np.exp(delta1)
-        prob_accept2 = 1.0 if delta2 > 0 else np.exp(delta2)
 
+        # Accept or reject new order1
         if np.random.rand() < prob_accept1:
             order1 = new_order1
             ln_likelihood1 = new_ln_likelihood1
             order1_dict = new_order1_dict 
             acceptance_count1 += 1
 
+        ###############################################
+        # STEP 3: Update order2 (Metropolis-Hastings)
+        ###############################################
+        # Propose new order2
+        new_order2 = order2.copy()
+        utils.shuffle_order(new_order2, n_shuffle)
+        new_order2_dict = dict(zip(biomarkers, new_order2))
+
+        # Calculate likelihood with new order1 and the updated subtype assignment
+        new_participant_data2 = sk.preprocess_participant_data(data_subtype2, new_order2_dict)
+        new_ln_likelihood2, _ = sk.compute_total_ln_likelihood_and_stage_likelihoods(
+            new_participant_data2,
+            non_diseased_ids,
+            theta_phi_estimates,
+            diseased_stages
+        )
+        
+        # Calculate acceptance probability
+        delta2 = new_ln_likelihood2 - ln_likelihood2
+        prob_accept2 = 1.0 if delta2 > 0 else np.exp(delta2)
+
+        # Accept or reject new order2
         if np.random.rand() < prob_accept2:
             order2 = new_order2
             ln_likelihood2 = new_ln_likelihood2
             order2_dict = new_order2_dict 
             acceptance_count2 += 1
-
-        all_orders['order1'].append(order1_dict.copy())
-        all_orders['order2'].append(order2_dict.copy())
-        participant_subtype_assignment_history.append(participant_subtype_assignment.copy())
         
         # Log progress
         if (iteration + 1) % max(10, iterations // 10) == 0:
             acceptance_ratio1 = 100 * acceptance_count1 / (iteration + 1)
             acceptance_ratio2 = 100 * acceptance_count2 / (iteration + 1)
+            subtype_accuracy = run.compute_subtype_accuracy(subtype_assignment, subtype_ground_truth)
             logging.info(
                 f"Iteration {iteration + 1}/{iterations}, "
                 f"Acceptance Ratio 1: {acceptance_ratio1:.2f}%, "
@@ -187,7 +253,8 @@ def metropolis_hastings_subtype_conjugate_priors(
                 f"Current Accepted Order1: {order1_dict}, "
                 f"Acceptance Ratio 2: {acceptance_ratio2:.2f}%, "
                 f"Log Likelihood 2: {ln_likelihood2:.4f}, "
-                f"Current Accepted Order2: {order2_dict}"
+                f"Current Accepted Order2: {order2_dict}, "
+                f"Subtype Accuracy: {subtype_accuracy}, "
             )
 
-    return all_orders, log_likelihoods, participant_subtype_assignment_history
+    return all_orders, log_likelihoods, subtype_assignments_history
