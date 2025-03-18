@@ -460,6 +460,9 @@ def run_ebm_subtype(
     results = {
         'total_tau': tau1+tau2,
         "subtype_accuracy": subtype_accuracy,
+        "upper_limit": upper_limit,
+        "max_total_ln_likelihood": max(total_log_likelihood_history),
+        "last_total_ln_likelihood": total_log_likelihood_history[-1],
         "n_iter": n_iter,
         "most_likely_order1": guessed_order1_dict,
         "kendalls_tau1": tau1, 

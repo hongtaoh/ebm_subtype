@@ -101,7 +101,7 @@ def metropolis_hastings_subtype_conjugate_priors(
     ln_likelihood1 = float('-inf')
     ln_likelihood2 = float('-inf')
     total_tau = 0
-    total_ln_likelihood = 0
+    total_ln_likelihood = float('-inf')
     subtype_accuracy = 0
 
     # Initiate containers
